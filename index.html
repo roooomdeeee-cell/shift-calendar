@@ -96,6 +96,7 @@ function render(){
  for(let d=1;d<=last.getDate();d++){
   const date=new Date(current.getFullYear(),current.getMonth(),d), shift=shiftFor(date);
   let cell=document.createElement("div"); cell.className="day "+(shift==="1直"?"s1":shift==="2直"?"s2":shift==="3直"?"s3":"off");
+  if(new Date().toDateString()===date.toDateString()){cell.classList.add("today");}
   cell.innerHTML=`<div class=date>${d}</div><div class=shift>${INFO[shift]}</div>`;
   cell.onclick=()=>openMenu(date); cal.appendChild(cell);
  }
