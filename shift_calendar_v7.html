@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>勤務シフトカレンダー v7 Firebase</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+body{font-family:-apple-system,sans-serif;margin:10px}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.dow{background:#ddd;text-align:center;padding:6px;font-weight:bold}
+.day{border:1px solid #ccc;min-height:100px;padding:4px;cursor:pointer}
+.date{font-weight:bold}.shift{white-space:pre-line;font-size:13px;margin-top:4px}
+.s1{background:#dbeeff}.s2{background:#fff5c9}.s3{background:#ffdede}.off{background:#efefef}
+.today{outline:3px solid red}.modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;align-items:center;justify-content:center}
+.box{background:#fff;padding:16px;border-radius:10px;min-width:280px}
+.choice{display:block;width:100%;margin:8px 0;padding:10px;font-size:16px}
+</style>
+</head>
+<body>
+<div>
+<button onclick="saveSettings()" id="saveBtn" disabled>💾 保存</button>
+<button onclick="adminLogin()">🔑 管理者</button>
+<button onclick="exportBackup()">📤 バックアップ保存</button>
+<button onclick="importBackup()">📥 バックアップ読込</button>
+<span id="mode">閲覧モード</span>
+<input type="file" id="importFile" accept=".json" style="display:none">
+<div id="saveStatus"></div>
+</div>
+
+<div class="header">
+<button onclick="changeMonth(-1)">◀</button>
+<div id="title"></div>
+<button onclick="changeMonth(1)">▶</button>
+</div>
+
+<div id="calendar" class="calendar"></div>
+
+<div id="modal" class="modal"><div class="box">
+<h3>シフト変更</h3>
+<button class="choice" onclick="setWeekShift('1直')">1直</button>
+<button class="choice" onclick="setWeekShift('2直')">2直</button>
+<button class="choice" onclick="setWeekShift('3直')">3直</button>
+<button class="choice" onclick="setDayOff()">休み</button>
+<button class="choice" onclick="clearDayOverride()">休み解除</button>
+<button class="choice" onclick="closeModal()">キャンセル</button>
+</div></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.0.0/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/12.0.0/firebase-firestore.js";
+
+const firebaseConfig={apiKey:"AIzaSyBY_hmu1FdPK2L6MRMWP5mfE4Yt1JD58YU",authDomain:"shift-calendar-65b91.firebaseapp.com",projectId:"shift-calendar-65b91",storageBucket:"shift-calendar-65b91.firebasestorage.app",messagingSenderId:"632005501141",appId:"1:632005501141:web:7b4133c2aa2a6e089d425c"};
+const app=initializeApp(firebaseConfig);
+const db=getFirestore(app);
+
+const ADMIN_CODE="0599";
+let isAdmin=false;
+
+window.adminLogin=()=>{
+ const c=prompt("管理者コード");
+ if(c===ADMIN_CODE){
+   isAdmin=true;
+   document.getElementById("mode").textContent="管理者モード";
+   document.getElementById("saveBtn").disabled=false;
+ } else alert("コード不正");
+};
+
+const INFO={"1直":"1直\n8:00〜17:00","2直":"2直\n12:00〜21:00","3直":"3直\n21:00〜6:00","休み":"休み"};
+const BASE_SHIFT="2直";
+const BASE_DATE=new Date("2026-06-01");
+let current=new Date(2026,5,1), selectedDate=null;
+let weekOverrides={}, dayOverrides={}, savedWeekOverrides={}, savedDayOverrides={};
+
+function fmt(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
+function parseDate(s){let p=s.split("-"); return new Date(+p[0],+p[1]-1,+p[2]);}
+function mondayOf(date){let d=new Date(date); let day=d.getDay(); let diff=(day===0?-6:1-day); d.setDate(d.getDate()+diff); d.setHours(0,0,0,0); return d;}
+function nextShift(s){if(s==="1直")return"3直"; if(s==="3直")return"2直"; return"1直";}
+function shiftFor(date){
+ const key=fmt(date); if(dayOverrides[key]==="休み") return "休み";
+ if(date.getDay()===0||date.getDay()===6) return "休み";
+ const weekKey=fmt(mondayOf(date)); let startWeek=mondayOf(BASE_DATE), startShift=BASE_SHIFT, latest=null;
+ for(const k in weekOverrides){ if(k<=weekKey && (!latest||k>latest)) latest=k; }
+ if(latest){ startWeek=parseDate(latest); startShift=weekOverrides[latest]; }
+ let weeks=Math.floor((mondayOf(date)-startWeek)/(1000*60*60*24*7));
+ let shift=startShift; for(let i=0;i<weeks;i++) shift=nextShift(shift); return shift;
+}
+function render(){
+ const cal=document.getElementById("calendar"); cal.innerHTML="";
+ document.getElementById("title").textContent=current.getFullYear()+"年 "+(current.getMonth()+1)+"月";
+ ["日","月","火","水","木","金","土"].forEach(d=>{let e=document.createElement("div");e.className="dow";e.textContent=d;cal.appendChild(e);});
+ const first=new Date(current.getFullYear(),current.getMonth(),1), last=new Date(current.getFullYear(),current.getMonth()+1,0);
+ for(let i=0;i<first.getDay();i++) cal.appendChild(document.createElement("div"));
+ for(let d=1;d<=last.getDate();d++){
+  const date=new Date(current.getFullYear(),current.getMonth(),d), shift=shiftFor(date);
+  let cell=document.createElement("div"); cell.className="day "+(shift==="1直"?"s1":shift==="2直"?"s2":shift==="3直"?"s3":"off");
+  cell.innerHTML=`<div class=date>${d}</div><div class=shift>${INFO[shift]}</div>`;
+  cell.onclick=()=>openMenu(date); cal.appendChild(cell);
+ }
+}
+window.openMenu=(date)=>{ if(!isAdmin) return; selectedDate=date; document.getElementById("modal").style.display="flex"; };
+window.closeModal=()=>document.getElementById("modal").style.display="none";
+window.setWeekShift=(s)=>{weekOverrides[fmt(mondayOf(selectedDate))]=s; closeModal(); render(); updateDirtyStatus();};
+window.setDayOff=()=>{dayOverrides[fmt(selectedDate)]="休み"; closeModal(); render(); updateDirtyStatus();};
+window.clearDayOverride=()=>{delete dayOverrides[fmt(selectedDate)]; closeModal(); render(); updateDirtyStatus();};
+window.changeMonth=(n)=>{current.setMonth(current.getMonth()+n); render();};
+
+function updateDirtyStatus(){
+ const dirty=JSON.stringify(savedWeekOverrides)!==JSON.stringify(weekOverrides)||JSON.stringify(savedDayOverrides)!==JSON.stringify(dayOverrides);
+ document.getElementById("saveStatus").textContent=dirty?"● 未保存の変更があります":"";
+}
+
+window.saveSettings=async()=>{
+ await setDoc(doc(db,"shift","main"),{
+  weekOverrides:JSON.stringify(weekOverrides),
+  dayOverrides:JSON.stringify(dayOverrides),
+  updatedAt:Date.now()
+ });
+ savedWeekOverrides=JSON.parse(JSON.stringify(weekOverrides));
+ savedDayOverrides=JSON.parse(JSON.stringify(dayOverrides));
+ updateDirtyStatus();
+ alert("Firebaseへ保存完了");
+};
+
+window.exportBackup=()=>{
+ const blob=new Blob([JSON.stringify({weekOverrides,dayOverrides},null,2)],{type:"application/json"});
+ const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="shift_backup.json"; a.click();
+};
+window.importBackup=()=>document.getElementById("importFile").click();
+
+document.getElementById("importFile").addEventListener("change",e=>{
+ const f=e.target.files[0]; if(!f) return;
+ const r=new FileReader();
+ r.onload=()=>{const d=JSON.parse(r.result); weekOverrides=d.weekOverrides||{}; dayOverrides=d.dayOverrides||{}; render(); updateDirtyStatus();};
+ r.readAsText(f);
+});
+
+async function loadData(){
+ const snap=await getDoc(doc(db,"shift","main"));
+ if(snap.exists()){
+   const d=snap.data();
+   weekOverrides=JSON.parse(d.weekOverrides||"{}");
+   dayOverrides=JSON.parse(d.dayOverrides||"{}");
+   savedWeekOverrides=JSON.parse(JSON.stringify(weekOverrides));
+   savedDayOverrides=JSON.parse(JSON.stringify(dayOverrides));
+ }
+ render(); updateDirtyStatus();
+}
+loadData();
+</script>
+</body>
+</html>
